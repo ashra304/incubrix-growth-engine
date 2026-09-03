@@ -397,11 +397,14 @@ def detect_incubrix_need(
         "backlog",
         "team management",
         "collaboration",
+        "workflow",
         "workflow automation",
         "content calendar",
         "production workflow",
         "batch record",
         "batch content",
+        "managing",
+        "manage",
     }
 
     # Implicit signals - suggest need for IncuBrix services
