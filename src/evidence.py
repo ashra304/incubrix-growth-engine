@@ -226,14 +226,15 @@ def detect_commercial_signal(
     Returns:
         (commercial_signal, evidence_url)
 
-    The function only returns True when explicit commercial
-    language is found in titles or descriptions.
+    The function looks for explicit and implicit commercial
+    language in titles and descriptions.
     """
 
     if not videos:
         return False, None
 
-    commercial_phrases = {
+    # Explicit commercial signals - must be present
+    explicit_phrases = {
         "sponsored",
         "sponsor",
         "paid partnership",
@@ -250,6 +251,42 @@ def detect_commercial_signal(
         "shop now",
         "buy now",
         "amazon affiliate",
+        "#ad",
+        "#sponsored",
+    }
+
+    # Implicit commercial signals - suggest commercial activity
+    implicit_phrases = {
+        "course",
+        "masterclass",
+        "coaching",
+        "membership",
+        "subscription",
+        "paid membership",
+        "premium",
+        "product launch",
+        "ecommerce",
+        "e-commerce",
+        "store",
+        "business",
+        "revenue",
+        "income",
+        "earn money",
+        "monetize",
+        "monetization",
+        "selling",
+        "sell",
+        "offer",
+        "service",
+        "consulting",
+        "freelance",
+        "agency",
+        "brand deal",
+        "partnership",
+        "collaboration",
+        "link in bio",
+        "use code",
+        "discount",
     }
 
     for video in videos:
@@ -258,9 +295,29 @@ def detect_commercial_signal(
 
         text = f"{title} {description}".lower()
 
-        for phrase in commercial_phrases:
+        # Check for explicit signals first
+        for phrase in explicit_phrases:
             if phrase in text:
                 return True, video.get("url")
+
+    # If no explicit signals, check for implicit commercial activity
+    implicit_count = 0
+    evidence_url = None
+    for video in videos:
+        title = video.get("title", "")
+        description = video.get("description", "")
+        text = f"{title} {description}".lower()
+
+        for phrase in implicit_phrases:
+            if phrase in text:
+                # Count multiple occurrences of the same phrase
+                occurrences = text.count(phrase)
+                implicit_count += occurrences
+                if evidence_url is None:
+                    evidence_url = video.get("url")
+                # If we have multiple commercial signals, consider it a real signal
+                if implicit_count >= 2:
+                    return True, evidence_url
 
     return False, None
 
@@ -303,52 +360,122 @@ def detect_incubrix_need(
     Returns:
         (incubrix_need, evidence_url)
 
-    The function looks for explicit creator/business problems
+    Looks for explicit and implicit creator/business problems
     in recent public YouTube content.
+    
+    IncuBrix-relevant needs include:
+    - Content creation and strategy
+    - Content repurposing and editing
+    - Video editing and captions
+    - Publishing and distribution
+    - Consistency and scheduling
+    - Content backlog management
+    - Team workflow and collaboration
     """
 
     if not videos:
         return False, None
 
-    need_phrases = {
+    # Explicit IncuBrix need signals
+    explicit_needs = {
         "content strategy",
         "content management",
         "content workflow",
         "creator workflow",
         "creator tools",
         "creator business",
+        "content creation",
+        "video editing",
+        "editing",
+        "captions",
+        "transcription",
+        "repurposing",
+        "repurpose",
+        "publishing",
+        "scheduling",
+        "consistency",
+        "backlog",
+        "team management",
+        "collaboration",
+        "workflow",
+        "workflow automation",
+        "content calendar",
+        "production workflow",
+        "batch record",
+        "batch content",
+        "managing",
+        "manage",
+    }
+
+    # Implicit signals - suggest need for IncuBrix services
+    implicit_needs = {
         "audience growth",
         "channel growth",
         "grow my channel",
         "grow your channel",
+        "growing",
         "scaling",
         "scale my",
         "scale your",
         "automation",
         "automate",
-        "workflow",
         "productivity",
-        "team management",
-        "managing my team",
-        "business growth",
+        "efficient",
+        "save time",
+        "time management",
+        "quality",
+        "high quality",
+        "professional",
         "monetization",
         "creator economy",
         "sponsorship management",
         "brand deals",
         "brand partnerships",
+        "consistent upload",
+        "regular upload",
+        "frequently",
+        "manage",
+        "organize",
+        "tools",
+        "system",
+        "process",
+        "business growth",
+        "business strategy",
     }
 
+    # Check for explicit signals first
+    evidence_url = None
+    explicit_count = 0
     for video in videos:
-
         title = video.get("title", "")
         description = video.get("description", "")
-
         text = f"{title} {description}".lower()
 
-        for phrase in need_phrases:
-
+        for phrase in explicit_needs:
             if phrase in text:
-                return True, video.get("url")
+                explicit_count += 1
+                if evidence_url is None:
+                    evidence_url = video.get("url")
+                # One explicit signal is enough
+                if explicit_count >= 1:
+                    return True, evidence_url
+
+    # If no explicit signals, check for multiple implicit signals
+    implicit_count = 0
+    evidence_url = None
+    for video in videos:
+        title = video.get("title", "")
+        description = video.get("description", "")
+        text = f"{title} {description}".lower()
+
+        for phrase in implicit_needs:
+            if phrase in text:
+                implicit_count += 1
+                if evidence_url is None:
+                    evidence_url = video.get("url")
+                # Need at least 3 implicit signals to confirm
+                if implicit_count >= 3:
+                    return True, evidence_url
 
     return False, None
 
@@ -357,14 +484,15 @@ def extract_business_contact(
     profile_url: str,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Extract an explicitly published business email from
+    Extract an explicitly published business contact from
     a public YouTube channel description.
 
     Returns:
         (contact_type, contact, evidence_url)
 
-    The function only extracts an email address when it
-    appears in the publicly available channel description.
+    Searches for business emails, contact forms, booking pages,
+    and other verified public contact routes. Guessed contacts
+    are not allowed - only published, verifiable contacts.
     """
 
     if not description:
@@ -385,78 +513,115 @@ def extract_business_contact(
         "work with us",
         "partnership",
         "partnerships",
+        "inquiries",
+        "inquiry",
+        "reach out",
+        "email",
+        "message",
+        "dm",
+        "booking",
+        "book",
+        "consulting",
+        "hire",
+        "hire me",
     }
 
-    # Email pattern.
+    # Email pattern
     email_pattern = (
         r"\b[A-Za-z0-9._%+-]+"
         r"@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     )
 
+    # URL patterns for contact forms, booking pages, etc.
+    url_patterns = [
+        r"(?:https?://)?(?:www\.)?[\w\-\.]+\.(com|org|net|co|io|app|dev|me)/?(?=[^\w\-\.]|\s|$)",  # Basic domain
+    ]
+
     lines = description.splitlines()
+    contact_lines = []
 
     for line in lines:
-
         line_lower = line.lower()
 
-        # The email must appear in a business-related line.
+        # Check if line contains business-related keywords
         has_business_context = any(
             keyword in line_lower
             for keyword in business_keywords
         )
 
-        if not has_business_context:
-            continue
+        if has_business_context:
+            contact_lines.append((line, line_lower))
 
-        email_match = re.search(
-            email_pattern,
-            line,
-        )
+    # Try to extract email first (most reliable)
+    for line, line_lower in contact_lines:
+        email_match = re.search(email_pattern, line)
 
         if not email_match:
             continue
 
         email = email_match.group(0)
 
-        # ---------------------------------------------
         # Normalize common accidental trailing letters
-        # after standard domain endings.
-        # ---------------------------------------------
-
         domain_endings = (
-            ".com",
-            ".org",
-            ".net",
-            ".co",
-            ".in",
-            ".io",
-            ".ai",
-            ".uk",
-            ".ca",
-            ".au",
-            ".sg",
+            ".com", ".org", ".net", ".co", ".in", ".io",
+            ".ai", ".uk", ".ca", ".au", ".sg",
         )
 
         email_lower = email.lower()
-
         best_end = None
 
         for ending in domain_endings:
             position = email_lower.find(ending)
-
             if position != -1:
                 end_position = position + len(ending)
-
                 if best_end is None or end_position > best_end:
                     best_end = end_position
 
         if best_end is not None:
             email = email[:best_end]
 
-        return (
-            "business_email",
-            email,
-            profile_url,
+        return ("business_email", email, profile_url)
+
+    # Try to extract contact form or booking page URLs
+    for line, line_lower in contact_lines:
+        # Look for URL patterns
+        if "http" in line_lower or ".com" in line_lower:
+            # Extract URLs
+            url_matches = re.findall(
+                r"https?://[^\s\)]+|www\.[^\s\)]+",
+                line
+            )
+            for url in url_matches:
+                # Clean up trailing punctuation
+                url = url.rstrip('.,;:)')
+                
+                # Detect type of contact method
+                url_lower = url.lower()
+                if any(x in url_lower for x in ["contact", "inquiry"]):
+                    return ("contact_form", url, profile_url)
+                elif any(x in url_lower for x in ["book", "calendly", "calendar", "appointment", "acuity"]):
+                    return ("booking_page", url, profile_url)
+                elif any(x in url_lower for x in ["linktr", "beacons"]):
+                    return ("link_aggregator", url, profile_url)
+                else:
+                    # Generic website link with business context
+                    return ("website", url, profile_url)
+
+    # Look for generic URLs in business context lines
+    for line, line_lower in contact_lines:
+        # Simple domain extraction
+        domain_matches = re.findall(
+            r"(?:https?://)?(?:www\.)?[\w\-\.]+\.(com|org|net|co|io)",
+            line,
+            re.IGNORECASE
         )
+        if domain_matches:
+            for domain in domain_matches:
+                if isinstance(domain, tuple):
+                    domain = domain[0]
+                # Construct full URL if needed
+                if not domain.startswith("http"):
+                    domain = "https://" + domain
+                return ("website", domain, profile_url)
 
     return None, None, None
