@@ -1,0 +1,1247 @@
+from collections import Counter
+from datetime import datetime, timezone
+
+from src.creator_discovery import (
+    discover_candidates,
+    enrich_candidate,
+)
+
+from src.lead_builder import build_lead
+
+from src.qualification import qualify_creator
+
+from src.deduplication import deduplicate_leads
+
+from src.priority import calculate_priority
+
+from src.personalization import (
+    generate_personalization_hook
+)
+
+from src.completeness import (
+    check_completeness
+)
+
+from src.duplicate_check import (
+    check_duplicate
+)
+
+from src.exporter import (
+    export_leads_to_csv
+)
+
+from src.freshness import (
+    is_evidence_within_30_days
+)
+
+
+# ============================================================
+# INCUBRIX SETTINGS
+# ============================================================
+
+APPROVED_COUNTRIES = {
+    "US",
+    "CA",
+    "GB",
+    "IE",
+    "AU",
+    "NZ",
+    "SG",
+}
+
+MIN_QUALIFIED_TARGET = 1000
+
+
+# ============================================================
+# UTILITY
+# ============================================================
+
+def _safe_int(value):
+    """
+    Convert a value to int safely.
+    """
+
+    try:
+        return int(value or 0)
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return 0
+
+
+# ============================================================
+# COUNTRY DISTRIBUTION VALIDATION
+# ============================================================
+
+def validate_country_distribution(
+    leads,
+):
+    """
+    Validate IncuBrix market requirements.
+
+    Requirements:
+
+    - At least 80% from approved markets.
+    - At least 3 countries.
+    - No country above 60%.
+    """
+
+    if not leads:
+
+        return {
+            "valid": False,
+            "total": 0,
+            "approved_percentage": 0.0,
+            "country_count": 0,
+            "max_country_percentage": 0.0,
+            "counts": {},
+            "reason": "No qualified leads",
+        }
+
+    counts = Counter(
+        (
+            lead.country_iso2 or ""
+        ).upper()
+        for lead in leads
+    )
+
+    total = len(leads)
+
+    approved_count = sum(
+        count
+        for country, count
+        in counts.items()
+        if country in APPROVED_COUNTRIES
+    )
+
+    approved_percentage = (
+        approved_count / total
+    ) * 100
+
+    country_count = len(
+        [
+            country
+            for country in counts
+            if country in APPROVED_COUNTRIES
+        ]
+    )
+
+    max_country_count = (
+        max(
+            counts.values()
+        )
+        if counts
+        else 0
+    )
+
+    max_country_percentage = (
+        max_country_count / total
+    ) * 100
+
+    valid = (
+        approved_percentage >= 80
+        and country_count >= 3
+        and max_country_percentage <= 60
+    )
+
+    reason_parts = []
+
+    if approved_percentage < 80:
+        reason_parts.append(
+            "Approved-market percentage below 80%"
+        )
+
+    if country_count < 3:
+        reason_parts.append(
+            "Fewer than 3 approved countries"
+        )
+
+    if max_country_percentage > 60:
+        reason_parts.append(
+            "One country exceeds 60%"
+        )
+
+    return {
+        "valid": valid,
+        "total": total,
+        "approved_percentage": round(
+            approved_percentage,
+            2,
+        ),
+        "country_count": country_count,
+        "max_country_percentage": round(
+            max_country_percentage,
+            2,
+        ),
+        "counts": dict(counts),
+        "reason": (
+            "; ".join(reason_parts)
+            if reason_parts
+            else "Country distribution valid"
+        ),
+    }
+
+
+# ============================================================
+# LEAD QUALIFICATION
+# ============================================================
+
+def _qualify_lead(
+    lead,
+    activity,
+    evidence,
+    existing_leads,
+):
+    """
+    Apply all qualification requirements to a lead.
+    """
+
+    content_count_30d = _safe_int(
+        activity.get(
+            "content_count_30d",
+            0,
+        )
+    )
+
+    longform_count_60d = _safe_int(
+        activity.get(
+            "longform_count_60d",
+            0,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Activity
+    # --------------------------------------------------------
+
+    active_30d = (
+        content_count_30d >= 8
+    )
+
+    long_form_60d = (
+        longform_count_60d >= 2
+    )
+
+    # --------------------------------------------------------
+    # Contactability
+    # --------------------------------------------------------
+
+    contactable = bool(
+        evidence.business_contact
+        and evidence.contact_evidence_url
+    )
+
+    # --------------------------------------------------------
+    # Required fields
+    # --------------------------------------------------------
+
+    complete_fields = all(
+        [
+            bool(
+                lead.creator_name
+            ),
+            bool(
+                lead.creator_segment
+            ),
+            bool(
+                lead.country_iso2
+            ),
+            bool(
+                lead.primary_language
+            ),
+            bool(
+                lead.primary_platform
+            ),
+            bool(
+                lead.profile_url
+            ),
+            bool(
+                lead.stable_creator_id
+            ),
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Freshness
+    # --------------------------------------------------------
+
+    evidence_fresh = (
+        is_evidence_within_30_days(
+            lead.checked_date
+        )
+    )
+
+    # --------------------------------------------------------
+    # Duplicate check BEFORE qualification
+    # --------------------------------------------------------
+
+    duplicate_result = (
+        check_duplicate(
+            lead,
+            existing_leads,
+        )
+    )
+
+    unique_creator = (
+        not duplicate_result.is_duplicate
+    )
+
+    # --------------------------------------------------------
+    # Qualification
+    # --------------------------------------------------------
+
+    qualification = qualify_creator(
+
+        creator_segment=(
+            lead.creator_segment
+        ),
+
+        country_iso2=(
+            lead.country_iso2
+        ),
+
+        primary_language=(
+            lead.primary_language
+        ),
+
+        has_official_profile=bool(
+            lead.profile_url
+        ),
+
+        has_stable_creator_id=bool(
+            lead.stable_creator_id
+        ),
+
+        active_30d=active_30d,
+
+        long_form_60d=long_form_60d,
+
+        commercial_signal=(
+            evidence.commercial_signal
+        ),
+
+        incubrix_need=(
+            evidence.incubrix_need
+        ),
+
+        contactable=contactable,
+
+        complete_fields=complete_fields,
+
+        unique_creator=unique_creator,
+
+        evidence_within_30d=(
+            evidence_fresh
+        ),
+    )
+
+    return {
+        "qualification": qualification,
+        "active_30d": active_30d,
+        "long_form_60d": long_form_60d,
+        "contactable": contactable,
+        "complete_fields": complete_fields,
+        "evidence_fresh": evidence_fresh,
+        "duplicate_result": duplicate_result,
+    }
+
+
+# ============================================================
+# PROCESS QUALIFIED LEAD
+# ============================================================
+
+def _enrich_qualified_lead(
+    lead,
+    evidence,
+    activity,
+    qualification_data,
+):
+    """
+    Add priority, personalization and diagnostics.
+    """
+
+    active_30d = (
+        qualification_data[
+            "active_30d"
+        ]
+    )
+
+    long_form_60d = (
+        qualification_data[
+            "long_form_60d"
+        ]
+    )
+
+    contactable = (
+        qualification_data[
+            "contactable"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Status
+    # --------------------------------------------------------
+
+    lead.candidate_status = (
+        "qualified"
+    )
+
+    # --------------------------------------------------------
+    # Priority
+    # --------------------------------------------------------
+
+    priority_result = (
+        calculate_priority(
+
+            qualified=True,
+
+            commercial_signal=(
+                evidence.commercial_signal
+            ),
+
+            incubrix_need=(
+                evidence.incubrix_need
+            ),
+
+            contactable=contactable,
+
+            active_30d=active_30d,
+
+            long_form_60d=(
+                long_form_60d
+            ),
+        )
+    )
+
+    lead.priority = (
+        priority_result.priority
+    )
+
+    # --------------------------------------------------------
+    # Personalization
+    # --------------------------------------------------------
+
+    lead.personalization_hook = (
+        generate_personalization_hook(
+
+            creator_name=(
+                lead.creator_name
+            ),
+
+            creator_segment=(
+                lead.creator_segment
+            ),
+
+            commercial_signal=(
+                evidence.commercial_signal
+            ),
+
+            incubrix_need=(
+                evidence.incubrix_need
+            ),
+
+            active_30d=active_30d,
+
+            long_form_60d=(
+                long_form_60d
+            ),
+        )
+    )
+
+    # --------------------------------------------------------
+    # Completeness
+    # --------------------------------------------------------
+
+    completeness_result = (
+        check_completeness(
+            lead
+        )
+    )
+
+    if completeness_result.complete:
+
+        lead.completeness_check = (
+            "complete"
+        )
+
+    else:
+
+        lead.completeness_check = (
+            "missing: "
+            + ", ".join(
+                completeness_result.missing_fields
+            )
+        )
+
+    # --------------------------------------------------------
+    # Duplicate status
+    # --------------------------------------------------------
+
+    lead.duplicate_check = (
+        "unique"
+    )
+
+    return lead
+
+
+# ============================================================
+# PROCESS REJECTED LEAD
+# ============================================================
+
+def _build_rejected_lead(
+    lead,
+    qualification_data,
+):
+    """
+    Preserve rejection diagnostics.
+    """
+
+    qualification = (
+        qualification_data[
+            "qualification"
+        ]
+    )
+
+    duplicate_result = (
+        qualification_data[
+            "duplicate_result"
+        ]
+    )
+
+    lead.candidate_status = (
+        "rejected"
+    )
+
+    reasons = list(
+        qualification.rejection_reasons
+    )
+
+    if duplicate_result.is_duplicate:
+
+        duplicate_reason = (
+            "Duplicate: "
+            + str(
+                duplicate_result.reason
+            )
+        )
+
+        if duplicate_reason not in reasons:
+            reasons.append(
+                duplicate_reason
+            )
+
+    lead.rejection_reason = (
+        "; ".join(reasons)
+    )
+
+    lead.duplicate_check = (
+        "duplicate: "
+        + str(
+            duplicate_result.reason
+        )
+        if duplicate_result.is_duplicate
+        else "unique"
+    )
+
+    return lead
+
+
+# ============================================================
+# PIPELINE
+# ============================================================
+
+def run_pipeline(
+    query: str = "technology",
+    max_results: int = 1000,
+):
+    """
+    Run the complete IncuBrix pipeline.
+
+    Flow:
+
+        Discovery
+             ↓
+        Evidence
+             ↓
+        Lead construction
+             ↓
+        Duplicate check
+             ↓
+        Qualification
+             ↓
+        Priority
+             ↓
+        Personalization
+             ↓
+        Completeness
+             ↓
+        Final deduplication
+             ↓
+        Country validation
+             ↓
+        Export
+    """
+
+    started_at = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+    print("=" * 70)
+
+    print(
+        "INCuBRIX GROWTH ENGINE"
+    )
+
+    print("=" * 70)
+
+    print(
+        f"Query: {query}"
+    )
+
+    print(
+        f"Requested qualified leads: "
+        f"{max_results}"
+    )
+
+    print()
+
+    # ========================================================
+    # 1. DISCOVERY
+    # ========================================================
+
+    # First discover lightweight candidates.
+    # Expensive activity and evidence checks happen later.
+    discovery_target = min(
+        max(20, max_results),
+        30,
+    )
+
+    print(
+        f"Discovery target: "
+        f"{discovery_target}"
+    )
+
+    discovered_candidates = discover_candidates(
+        query=query,
+        target=discovery_target,
+    )
+
+    print(
+        f"Discovered candidates: "
+        f"{len(discovered_candidates)}"
+    )
+
+    # Enrich only the discovered candidates.
+    # This keeps discovery itself fast and separates
+    # cheap search from expensive validation.
+    discovered = []
+
+    for candidate in discovered_candidates:
+
+        enriched = enrich_candidate(
+            candidate
+        )
+
+        discovered.append(
+            enriched
+        )
+
+    print(
+        f"Enriched candidates: "
+        f"{len(discovered)}"
+    )
+
+    print()
+
+    # ========================================================
+    # 2. STORAGE
+    # ========================================================
+
+    qualified_leads = []
+
+    rejected_leads = []
+
+    seen_ids = set()
+
+    # ========================================================
+    # 2. STORAGE
+    # ========================================================
+
+    qualified_leads = []
+
+    rejected_leads = []
+
+    seen_ids = set()
+
+    # ========================================================
+    # 3. PROCESS CANDIDATES
+    # ========================================================
+
+    for index, (
+        candidate,
+        activity,
+        evidence,
+    ) in enumerate(
+        discovered,
+        start=1,
+    ):
+
+        print(
+            f"[{index}/{len(discovered)}] "
+            f"{candidate.creator_name}"
+        )
+
+        # ----------------------------------------------------
+        # Build lead
+        # ----------------------------------------------------
+
+        lead = build_lead(
+            candidate=candidate,
+            activity=activity,
+            evidence=evidence,
+            lead_id=(
+                f"YT-{candidate.stable_creator_id}"
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Global stable-ID duplicate
+        # ----------------------------------------------------
+
+        stable_id = (
+            lead.stable_creator_id
+            or candidate.stable_creator_id
+            or ""
+        ).strip()
+
+        if (
+            stable_id
+            and stable_id in seen_ids
+        ):
+
+            lead.candidate_status = (
+                "rejected"
+            )
+
+            lead.rejection_reason = (
+                "Duplicate stable creator ID"
+            )
+
+            lead.duplicate_check = (
+                "duplicate: stable_creator_id"
+            )
+
+            rejected_leads.append(
+                lead
+            )
+
+            continue
+
+        if stable_id:
+            seen_ids.add(
+                stable_id
+            )
+
+        # ----------------------------------------------------
+        # Qualification
+        # ----------------------------------------------------
+
+        qualification_data = (
+            _qualify_lead(
+                lead=lead,
+                activity=activity,
+                evidence=evidence,
+                existing_leads=(
+                    qualified_leads
+                ),
+            )
+        )
+
+        qualification = (
+            qualification_data[
+                "qualification"
+            ]
+        )
+
+        # ----------------------------------------------------
+        # Rejected
+        # ----------------------------------------------------
+
+        if not qualification.qualified:
+
+            lead = _build_rejected_lead(
+                lead=lead,
+                qualification_data=(
+                    qualification_data
+                ),
+            )
+
+            rejected_leads.append(
+                lead
+            )
+
+            print(
+                "  -> REJECTED"
+            )
+
+            print(
+                f"     {lead.rejection_reason}"
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Qualified
+        # ----------------------------------------------------
+
+        lead = _enrich_qualified_lead(
+            lead=lead,
+            evidence=evidence,
+            activity=activity,
+            qualification_data=(
+                qualification_data
+            ),
+        )
+
+        qualified_leads.append(
+            lead
+        )
+
+        print(
+            "  -> QUALIFIED"
+        )
+
+        print(
+            f"     Priority: "
+            f"{lead.priority}"
+        )
+
+        # ----------------------------------------------------
+        # Stop once target is reached.
+        #
+        # Final deduplication and validation happen below.
+        # ----------------------------------------------------
+
+        if len(qualified_leads) >= max_results:
+            break
+
+    # ========================================================
+    # 4. FINAL DEDUPLICATION
+    # ========================================================
+
+    print()
+
+    print(
+        "Running final deduplication..."
+    )
+
+    final_leads = (
+        deduplicate_leads(
+            qualified_leads
+        )
+    )
+
+    # ========================================================
+    # 5. REMOVE DUPLICATE STABLE IDS AGAIN
+    # ========================================================
+
+    unique_final_leads = []
+
+    final_ids = set()
+
+    duplicate_count = 0
+
+    for lead in final_leads:
+
+        stable_id = (
+            lead.stable_creator_id
+            or ""
+        ).strip()
+
+        if not stable_id:
+
+            duplicate_count += 1
+
+            lead.candidate_status = (
+                "rejected"
+            )
+
+            lead.rejection_reason = (
+                "Missing stable creator ID"
+            )
+
+            rejected_leads.append(
+                lead
+            )
+
+            continue
+
+        if stable_id in final_ids:
+
+            duplicate_count += 1
+
+            lead.candidate_status = (
+                "rejected"
+            )
+
+            lead.rejection_reason = (
+                "Duplicate after final validation"
+            )
+
+            lead.duplicate_check = (
+                "duplicate: stable_creator_id"
+            )
+
+            rejected_leads.append(
+                lead
+            )
+
+            continue
+
+        final_ids.add(
+            stable_id
+        )
+
+        lead.duplicate_check = (
+            "unique"
+        )
+
+        unique_final_leads.append(
+            lead
+        )
+
+    final_leads = (
+        unique_final_leads
+    )
+
+    # ========================================================
+    # 6. COUNTRY DISTRIBUTION
+    # ========================================================
+
+    country_validation = (
+        validate_country_distribution(
+            final_leads
+        )
+    )
+
+    # ========================================================
+    # 7. PRIORITY A
+    # ========================================================
+
+    priority_a = [
+        lead
+        for lead in final_leads
+        if str(
+            lead.priority
+        ).upper()
+        == "A"
+    ]
+
+    # ========================================================
+    # 8. EXPORT FINAL LEADS
+    # ========================================================
+
+    final_export_path = (
+        export_leads_to_csv(
+            final_leads,
+            "data/final_leads.csv",
+        )
+    )
+
+    # ========================================================
+    # 9. EXPORT REJECTED LEADS
+    # ========================================================
+
+    rejected_export_path = (
+        export_leads_to_csv(
+            rejected_leads,
+            "data/rejected_leads.csv",
+        )
+    )
+
+    # ========================================================
+    # 10. SUMMARY
+    # ========================================================
+
+    finished_at = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+    runtime_seconds = (
+        finished_at
+        - started_at
+    ).total_seconds()
+
+    print()
+
+    print("=" * 70)
+
+    print(
+        "PIPELINE SUMMARY"
+    )
+
+    print("=" * 70)
+
+    print(
+        f"TOTAL DISCOVERED : "
+        f"{len(discovered)}"
+    )
+
+    print(
+        f"QUALIFIED        : "
+        f"{len(qualified_leads)}"
+    )
+
+    print(
+        f"FINAL UNIQUE     : "
+        f"{len(final_leads)}"
+    )
+
+    print(
+        f"REJECTED         : "
+        f"{len(rejected_leads)}"
+    )
+
+    print(
+        f"DUPLICATES REMOVED: "
+        f"{duplicate_count}"
+    )
+
+    print(
+        f"PRIORITY A       : "
+        f"{len(priority_a)}"
+    )
+
+    print()
+
+    print(
+        "COUNTRY DISTRIBUTION"
+    )
+
+    print(
+        country_validation[
+            "counts"
+        ]
+    )
+
+    print(
+        f"Approved markets : "
+        f"{country_validation['approved_percentage']}%"
+    )
+
+    print(
+        f"Countries        : "
+        f"{country_validation['country_count']}"
+    )
+
+    print(
+        f"Max country      : "
+        f"{country_validation['max_country_percentage']}%"
+    )
+
+    print(
+        f"Distribution     : "
+        f"{country_validation['reason']}"
+    )
+
+    print()
+
+    print(
+        f"Runtime          : "
+        f"{runtime_seconds:.2f} seconds"
+    )
+
+    print()
+
+    print(
+        f"FINAL EXPORT     : "
+        f"{final_export_path}"
+    )
+
+    print(
+        f"REJECTED EXPORT  : "
+        f"{rejected_export_path}"
+    )
+
+    print("=" * 70)
+
+    # ========================================================
+    # 11. REQUIREMENT CHECK
+    # ========================================================
+
+    print()
+
+    print(
+        "REQUIREMENT CHECK"
+    )
+
+    print("-" * 70)
+
+    target_met = (
+        len(final_leads)
+        >= max_results
+    )
+
+    duplicate_free = (
+        duplicate_count == 0
+    )
+
+    print(
+        f"[{'PASS' if target_met else 'FAIL'}] "
+        f"Qualified target: "
+        f"{len(final_leads)}/{max_results}"
+    )
+
+    print(
+        f"[{'PASS' if duplicate_free else 'FAIL'}] "
+        f"Final duplicates: "
+        f"{duplicate_count}"
+    )
+
+    print(
+        f"[{'PASS' if country_validation['valid'] else 'FAIL'}] "
+        f"Country distribution"
+    )
+
+    print(
+        f"[{'PASS' if len(priority_a) >= 25 else 'WARN'}] "
+        f"Priority A leads: "
+        f"{len(priority_a)}/25"
+    )
+
+    # ========================================================
+    # 12. WARNINGS
+    # ========================================================
+
+    if not target_met:
+
+        print()
+
+        print(
+            "[WARNING] "
+            "The pipeline did not reach the requested "
+            "qualified-lead target."
+        )
+
+        print(
+            "Increase discovery coverage/query variants "
+            "rather than fabricating leads."
+        )
+
+    if not country_validation["valid"]:
+
+        print()
+
+        print(
+            "[WARNING] "
+            "Country distribution does not satisfy "
+            "all IncuBrix market constraints."
+        )
+
+    if len(priority_a) < 25:
+
+        print()
+
+        print(
+            "[WARNING] "
+            "Fewer than 25 Priority A leads were produced."
+        )
+
+    print()
+
+    return final_leads
+
+
+# ============================================================
+# DIRECT EXECUTION
+# ============================================================
+
+if __name__ == "__main__":
+
+    results = run_pipeline(
+        query="technology",
+        max_results=1000,
+    )
+
+    print()
+
+    print(
+        "FINAL QUALIFIED LEADS"
+    )
+
+    print("=" * 70)
+
+    for lead in results[:25]:
+
+        print()
+
+        print(
+            f"Creator: "
+            f"{lead.creator_name}"
+        )
+
+        print(
+            f"Country: "
+            f"{lead.country_iso2}"
+        )
+
+        print(
+            f"Language: "
+            f"{lead.primary_language}"
+        )
+
+        print(
+            f"Platform: "
+            f"{lead.primary_platform}"
+        )
+
+        print(
+            f"Contact: "
+            f"{lead.business_contact}"
+        )
+
+        print(
+            f"Commercial: "
+            f"{lead.monetization_signal}"
+        )
+
+        print(
+            f"IncuBrix Need: "
+            f"{lead.incubrix_need}"
+        )
+
+        print(
+            f"Priority: "
+            f"{lead.priority}"
+        )
+
+        print(
+            f"Personalization: "
+            f"{lead.personalization_hook}"
+        )
+
+        print(
+            f"Completeness: "
+            f"{lead.completeness_check}"
+        )
+
+        print(
+            f"Duplicate Check: "
+            f"{lead.duplicate_check}"
+        )
+
+        print(
+            f"Status: "
+            f"{lead.candidate_status}"
+        )
+
+        print(
+            f"Rejection: "
+            f"{lead.rejection_reason}"
+        )

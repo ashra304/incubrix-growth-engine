@@ -52,83 +52,64 @@ def discover_youtube_channels(
     query: str,
     max_results: int = 10,
 ) -> list[SourceRecord]:
-    """
-    Discover YouTube channels using the YouTube Data API v3.
-
-    This function only discovers candidates.
-    Qualification happens later.
-    """
-
-    params = {
-        "part": "snippet",
-        "q": query,
-        "type": "channel",
-        "maxResults": max_results,
-        "key": YOUTUBE_API_KEY,
-    }
-
-    response = requests.get(
-        YOUTUBE_SEARCH_URL,
-        params=params,
-        timeout=30,
-    )
-    response.raise_for_status()
-
-    data = response.json()
-
-    channel_ids = []
-
-    for item in data.get("items", []):
-        channel_id = item.get("id", {}).get("channelId")
-
-        if channel_id:
-            channel_ids.append(channel_id)
-
-    if not channel_ids:
+    """Discover public YouTube channels, paging safely beyond 50 results."""
+    if max_results <= 0:
         return []
 
-    # Get channel details, including country when publicly available.
-    channel_params = {
-        "part": "snippet",
-        "id": ",".join(channel_ids),
-        "key": YOUTUBE_API_KEY,
-    }
+    channel_ids: list[str] = []
+    page_token: str | None = None
 
-    channel_response = requests.get(
-        YOUTUBE_CHANNELS_URL,
-        params=channel_params,
-        timeout=30,
-    )
-    channel_response.raise_for_status()
+    # search.list permits at most 50 results per request. The previous version
+    # passed a larger value directly, so the 1,000-lead mode could not run.
+    while len(channel_ids) < max_results:
+        params = {
+            "part": "snippet",
+            "q": query,
+            "type": "channel",
+            "maxResults": min(50, max_results - len(channel_ids)),
+            "key": YOUTUBE_API_KEY,
+        }
+        if page_token:
+            params["pageToken"] = page_token
 
-    channel_data = channel_response.json()
+        response = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        for item in data.get("items", []):
+            channel_id = item.get("id", {}).get("channelId")
+            if channel_id and channel_id not in channel_ids:
+                channel_ids.append(channel_id)
+
+        page_token = data.get("nextPageToken")
+        if not page_token or not data.get("items"):
+            break
 
     records = []
-
-    for item in channel_data.get("items", []):
-        channel_id = item["id"]
-        snippet = item.get("snippet", {})
-
-        channel_title = snippet.get("title", "")
-        description = snippet.get("description", "")
-        country_iso2 = snippet.get("country")
-
-        channel_url = (
-            f"https://www.youtube.com/channel/{channel_id}"
+    # channels.list also allows no more than 50 IDs per request.
+    for start in range(0, len(channel_ids), 50):
+        channel_params = {
+            "part": "snippet",
+            "id": ",".join(channel_ids[start : start + 50]),
+            "key": YOUTUBE_API_KEY,
+        }
+        channel_response = requests.get(
+            YOUTUBE_CHANNELS_URL, params=channel_params, timeout=30
         )
-
-        record = normalize_youtube_channel(
-            channel_id=channel_id,
-            channel_title=channel_title,
-            channel_url=channel_url,
-            country_iso2=country_iso2,
-            description=description,
-        )
-
-        records.append(record)
+        channel_response.raise_for_status()
+        for item in channel_response.json().get("items", []):
+            channel_id = item["id"]
+            snippet = item.get("snippet", {})
+            records.append(
+                normalize_youtube_channel(
+                    channel_id=channel_id,
+                    channel_title=snippet.get("title", ""),
+                    channel_url=f"https://www.youtube.com/channel/{channel_id}",
+                    country_iso2=snippet.get("country"),
+                    description=snippet.get("description", ""),
+                )
+            )
 
     return records
-
 
 def parse_iso8601_duration(duration: str) -> int:
     """

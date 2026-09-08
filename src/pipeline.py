@@ -78,29 +78,20 @@ def run_pipeline(
         # 4. PREPARE QUALIFICATION SIGNALS
         # -----------------------------------------------------
 
-        active_30d = (
-            (activity.get("content_count_30d") or 0) > 0
-        )
+        # Assessment rule: at least eight items in 30 days OR two long-form
+        # items in 60 days. A single recent upload is not sufficient.
+        active_30d = (activity.get("content_count_30d") or 0) >= 8
+        long_form_60d = (activity.get("longform_count_60d") or 0) >= 2
 
-        long_form_60d = (
-            (activity.get("longform_count_60d") or 0) > 0
-        )
-
+        # A contact value is only usable when its type and public evidence URL
+        # are also captured for the reviewer.
         contactable = bool(
-            evidence.business_contact
+            evidence.business_contact_type
+            and evidence.business_contact
+            and evidence.contact_evidence_url
         )
 
-        complete_fields = all(
-            [
-                bool(lead.creator_name),
-                bool(lead.creator_segment),
-                bool(lead.country_iso2),
-                bool(lead.primary_language),
-                bool(lead.primary_platform),
-                bool(lead.profile_url),
-                bool(lead.stable_creator_id),
-            ]
-        )
+        complete_fields = check_completeness(lead).complete
 
         # -----------------------------------------------------
         # 5. QUALIFICATION

@@ -35,7 +35,7 @@ def export_leads_to_csv(
 
     with path.open(
         "w",
-        encoding="utf-8-sig",
+        encoding="utf-8",
         newline="",
     ) as file:
 
